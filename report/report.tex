@@ -1,0 +1,154 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{enumitem}
+\setlist{noitemsep,topsep=2pt}
+
+\newcommand{\ph}[1]{{\color{gray}[#1]}}
+
+\title{AI-Generated Text Detection}
+\author{Mariia Hamaniuk \\ UCU AI 2026, HW3}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+\section{Task and Data}
+Task: to detect what text is written by human, ai and fusion (human written text changed by AI). Metric is macro-F1.
+
+Data: 5 cols:
+\begin{itemize}
+  \item id (will not be used, not meaningful),
+  \item text,
+  \item lang (only english (80.6\% in train, 85.3\% in test) and german),
+  \item domain,
+  \item label.
+\end{itemize}
+
+Initial q-n that is whether domain has any correlation between it and label.
+\ph{answer: yes for arxiv\_papers (84\% ai) and gutenberg (92\% ai); other domains are close to the overall distribution. lang column is reliable: stop-word check disagrees on 0.5\% of texts; German is 99\% bundestag}
+
+Data is clean there are no missing data. The most labels are with AI texts (44.8\%) and smallest amount of human written text (24.5\%), fusion is 30.7\%. We have class imbalance here. In german it is spread more evenly.
+
+The thing that made me really surprised that the domain arxiv\_papers and gutenberg has really big percentage of ai but I think that some mistake is here but how to understand how to correct it needed additional analysis.
+\ph{result of the analysis: not a mistake, dataset construction. human/fusion texts are extracted PDFs/books with artifacts (arXiv headers, ligatures, mojibake, emails), ai texts are clean generations; there are even LLM refusals labelled ai}
+
+Domains are not spread evenly between train and test data (gutenberg 2.7\% vs 7.4\%, euro\_court\_cases 10.1\% vs 6.4\%, German 19.4\% vs 14.7\%).
+
+AI texts are the longest only in English (median 481 vs 439 words for human); in German they are the shortest (430 vs 584).
+\ph{texts are capped at 3000 words, no newlines (formatting normalized); 50--94\% of texts are longer than 512 XLM-R tokens (73--94\% in German) $\rightarrow$ long-text handling is required}
+
+\begin{figure}[H]
+\centering
+\begin{minipage}[b]{.38\linewidth}
+\centering
+\includegraphics[height=3.2cm]{figures/class_balance.png}
+\caption{Class shares by domain.}
+\label{fig:class_balance}
+\end{minipage}\hfill
+\begin{minipage}[b]{.6\linewidth}
+\centering
+\includegraphics[height=3.2cm]{figures/lengths.png}
+\caption{Text lengths (words, log scale).}
+\label{fig:lengths}
+\end{minipage}
+\end{figure}
+
+I decided not to unify characters so AI markers do not slip away, but some html leftovers need to be checked.
+\ph{checked: HTML entities appear only in human/fusion blogs (7\% / 4.7\%, ai 0.1\%) $\rightarrow$ source shortcut, unescaped; changed 0.6\% of train and 0.85\% of test texts; 0 duplicates by text, 0 train--test overlap}
+
+\noindent\ph{EDA key findings and how they shaped decisions:}
+\begin{itemize}
+  \item \ph{TF-IDF clouds (Fig.~\ref{fig:clouds}, \ref{fig:clouds_domain}): texts cluster by domain; within a domain ai separates, human and fusion overlap $\rightarrow$ fusion vs human is the hard pair}
+  \item \ph{burstiness (sentence length CV) is the strongest single feature: ai $-0.40$, human $+0.27$, fusion in between}
+  \item \ph{markers: fusion is in between human and ai (e.g. buzzwords\_en 0.03 / 0.19 / 0.46); German fusion has its own quirks (nicht nur\ldots sondern 0.59, ellipsis char 0.19)}
+  \item \ph{human$\leftrightarrow$fusion pairs: 40.3\% of train texts have a near-duplicate pair in train, only 0.06\% of test texts have one $\rightarrow$ group split}
+  \item \ph{pair diff (1500 pairs): beginning almost untouched (2\% words changed in first decile), $\sim$40\% in the middle, 72\% in the last decile for EN; first change at $\sim$42\% of text; EN fusion is 15\% shorter $\rightarrow$ head+tail for the encoder}
+  \item \ph{LLM adds: furthermore, crucial, potential, significant, challenges / müssen, sondern, wir, Herausforderungen, Verantwortung; removes: i, you, straight apostrophe / ich, ja, jetzt, dann (spoken fillers)}
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\begin{minipage}[b]{.6\linewidth}
+\centering
+\includegraphics[height=5.5cm]{figures/markers.png}
+\caption{Share of texts with each AI marker (color normalized per row).}
+\label{fig:markers}
+\end{minipage}\hfill
+\begin{minipage}[b]{.38\linewidth}
+\centering
+
+\end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{minipage}[b]{.45\linewidth}
+\centering
+\includegraphics[height=5cm]{figures/tfidf_clouds.png}
+\caption{t-SNE of word / char TF-IDF by label and by domain.}
+\label{fig:clouds}
+\end{minipage}\hfill
+\begin{minipage}[b]{.53\linewidth}
+\centering
+\includegraphics[width=\linewidth]{figures/tfidf_clouds_by_domain.png}
+\caption{Char TF-IDF t-SNE per domain, by label.}
+\label{fig:clouds_domain}
+\end{minipage}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[height=3.2cm]{figures/fusion_change_profile.png}
+\caption{Share of human words changed in the fusion rewrite, by position in the human text (1500 pairs).}
+\label{fig:fusion_profile}
+\end{figure}
+
+\section{Validation Protocol}
+\ph{fixed split: 20\% val (54{,}537 texts), StratifiedGroupKFold (1 of 5 folds), stratified by label $\times$ language $\times$ domain, seed 42; groups = near-duplicate pairs (same normalized first or last 150 chars, keys shared by $>5$ texts treated as boilerplate), so pairs never cross folds}
+
+\noindent\ph{why not random split: test has almost no pairs in train, random split would leak human text into val through its fusion copy}
+
+\noindent\ph{encoder trains on a fixed 40k stratified sample of the train fold; all models evaluated on the full val fold; stability: macro-F1 per language and per domain}
+
+\section{Baseline}
+\ph{TF-IDF word 1--2 grams (punctuation kept as tokens) + char\_wb 3--5 grams, 200k features each, sublinear tf, vocabulary fitted on a 50k train subsample; ablation word / char / word+char; grid \{LinearSVC, LogReg\} $\times$ C \{0.1, 0.3, 1, 3\} $\times$ class\_weight \{None, balanced\} on 50k, best refit on a 100k stratified sample of the train fold (full 218k ran out of 30 GB RAM -- failed attempt); results table, confusion matrix in Appendix}
+
+\section{Encoder}
+\ph{xlm-roberta-base, 512 tokens, head+tail: first 128 + last 382 tokens (from the pair diff: fusion rewrites are mostly after the beginning); 2 epochs, lr 2e-5, warmup 6\%, batch 16, fp16, T4; comparison with baseline on the same val fold}
+
+\section{Experiments}
+\ph{each experiment: idea $\rightarrow$ reference $\rightarrow$ result $\rightarrow$ conclusion}
+\begin{enumerate}
+  \item \ph{experiment 1}
+  \item \ph{experiment 2}
+\end{enumerate}
+
+\noindent\ph{failed attempts and why}
+
+\section{Final Model}
+\ph{final pipeline, selected Kaggle submissions (file names), public/private score}
+
+\noindent\ph{how to run: hw3-prep-eda (CPU) $\rightarrow$ hw3-baseline (CPU) $\rightarrow$ hw3-encoder (GPU T4) $\rightarrow$ experiments $\rightarrow$ postproc; each notebook takes previous outputs as Kaggle inputs; runtime per notebook}
+
+\noindent\ph{code was written with help of AI tools (allowed for code); cite XLM-R, mDeBERTa, Qwen2.5, scikit-learn, Hugging Face Transformers}
+
+\section{Explainability}
+\ph{method (SHAP / LIME / token attributions), what the model relies on, conclusions}
+
+\section{Conclusions}
+\ph{main takeaways, limitations}
+
+\clearpage
+\appendix
+\section{Figures and Tables}
+\subsection{Results}
+\ph{confusion matrices, per-domain F1, xAI examples}
+
+\end{document}
